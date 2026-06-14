@@ -1,0 +1,24 @@
+# Token-budget metadata for the CodexCLIProvider (local ``codex`` binary).
+# Bundled with the package; consulted when SKILLSPECTOR_PROVIDER=codex_cli.
+#
+# Format:
+#   models:
+#     "<model-label>":
+#       context_length: <int>
+#       max_output_tokens: <int>
+#
+# When the model is not listed here, callers fall back to the package-wide
+# defaults in constants.py (128 k context, 32 k output).
+
+models:
+  "o4-mini":
+    context_length: 200000
+    max_output_tokens: 100000
+
+  "o3":
+    context_length: 200000
+    max_output_tokens: 100000
+
+  "gpt-4.1":
+    context_length: 1000000
+    max_output_tokens: 32768

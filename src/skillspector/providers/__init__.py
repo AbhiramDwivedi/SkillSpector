@@ -25,15 +25,23 @@ Selection happens via the ``SKILLSPECTOR_PROVIDER`` env var:
     openai        → OpenAIProvider          (api.openai.com)
     anthropic     → AnthropicProvider       (api.anthropic.com)
     nv_build      → NvBuildProvider         (build.nvidia.com)
+    claude_cli    → ClaudeCLIProvider       (local ``claude`` binary, no API key)
+    codex_cli     → CodexCLIProvider        (local ``codex`` binary, no API key)
 
 When unset, the selector defaults to ``nv_build``.
+
+CLI providers (``claude_cli``, ``codex_cli``) implement the optional
+:class:`~skillspector.providers.base.AgentCLICapable` interface — they
+expose ``is_available()`` and ``complete()`` so that
+:func:`skillspector.llm_utils.chat_completion` uses the local CLI
+subprocess instead of the ``ChatOpenAI`` HTTP transport.
 """
 
 from __future__ import annotations
 
 import os
 
-from .base import CredentialsProvider, ModelMetadataProvider
+from .base import AgentCLICapable, CredentialsProvider, ModelMetadataProvider, has_cli_capability
 from .nv_build import NvBuildProvider
 
 
@@ -51,6 +59,14 @@ def _select_active_provider() -> ModelMetadataProvider:
         return AnthropicProvider()
     if name == "nv_build":
         return NvBuildProvider()
+    if name == "claude_cli":
+        from .claude_cli import ClaudeCLIProvider
+
+        return ClaudeCLIProvider()
+    if name == "codex_cli":
+        from .codex_cli import CodexCLIProvider
+
+        return CodexCLIProvider()
     if name in ("nv_inference", ""):
         # Try the optional nv_inference subpackage if it's bundled with
         # this installation; otherwise fall through to nv_build.
@@ -63,7 +79,7 @@ def _select_active_provider() -> ModelMetadataProvider:
 
     raise ValueError(
         f"Unknown SKILLSPECTOR_PROVIDER: {name!r}. "
-        "Expected one of: openai, anthropic, nv_build (or unset)."
+        "Expected one of: openai, anthropic, nv_build, claude_cli, codex_cli (or unset)."
     )
 
 
@@ -72,18 +88,32 @@ def get_metadata_provider() -> ModelMetadataProvider:
     return _select_active_provider()
 
 
+def get_active_provider() -> ModelMetadataProvider:
+    """Return the active provider (alias for :func:`get_metadata_provider`).
+
+    Preferred over :func:`get_metadata_provider` when callers also need to
+    check for optional capabilities (e.g. :func:`has_cli_capability`).
+    """
+    return _select_active_provider()
+
+
 def resolve_provider_credentials() -> tuple[str, str | None] | None:
     """Return ``(api_key, base_url)`` from the active provider.
 
     Returns ``None`` when the provider's credential env var is unset, so
-    callers can fall through to other credential sources.
+    callers can fall through to other credential sources.  CLI providers
+    always return ``None`` from this method; availability is checked via
+    ``is_available()`` instead.
     """
     return _select_active_provider().resolve_credentials()
 
 
 __all__ = [
+    "AgentCLICapable",
     "CredentialsProvider",
     "ModelMetadataProvider",
+    "get_active_provider",
     "get_metadata_provider",
+    "has_cli_capability",
     "resolve_provider_credentials",
 ]

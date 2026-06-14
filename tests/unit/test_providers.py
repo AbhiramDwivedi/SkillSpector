@@ -26,10 +26,13 @@ import pytest
 
 from skillspector.providers import (
     get_metadata_provider,
+    has_cli_capability,
     registry,
     resolve_provider_credentials,
 )
 from skillspector.providers.anthropic import ANTHROPIC_BASE_URL, AnthropicProvider
+from skillspector.providers.claude_cli import ClaudeCLIProvider
+from skillspector.providers.codex_cli import CodexCLIProvider
 from skillspector.providers.nv_build import BUILD_BASE_URL, NvBuildProvider
 from skillspector.providers.openai import OpenAIProvider
 
@@ -257,3 +260,88 @@ class TestProviderSelection:
         monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "vertex")
         with pytest.raises(ValueError, match="Unknown SKILLSPECTOR_PROVIDER"):
             get_metadata_provider()
+
+    def test_select_claude_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "claude_cli")
+        provider = get_metadata_provider()
+        assert isinstance(provider, ClaudeCLIProvider)
+        # CLI provider returns no HTTP credentials
+        assert resolve_provider_credentials() is None
+
+    def test_select_codex_cli(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "codex_cli")
+        provider = get_metadata_provider()
+        assert isinstance(provider, CodexCLIProvider)
+        assert resolve_provider_credentials() is None
+
+
+class TestClaudeCLIProvider:
+    """Claude CLI provider — metadata, availability, and capability detection."""
+
+    def test_resolve_model_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SKILLSPECTOR_MODEL", raising=False)
+        assert ClaudeCLIProvider().resolve_model() == ClaudeCLIProvider.DEFAULT_MODEL
+
+    def test_resolve_model_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_MODEL", "claude-opus-4-6")
+        assert ClaudeCLIProvider().resolve_model() == "claude-opus-4-6"
+
+    def test_resolve_model_meta_analyzer_slot(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SKILLSPECTOR_MODEL", raising=False)
+        assert ClaudeCLIProvider().resolve_model("meta_analyzer") == "claude-haiku-3-5"
+
+    def test_metadata_known_model(self) -> None:
+        provider = ClaudeCLIProvider()
+        assert provider.get_context_length("claude-sonnet-4-6") == 1_000_000
+        assert provider.get_max_output_tokens("claude-sonnet-4-6") == 128_000
+
+    def test_metadata_unknown_model_returns_none(self) -> None:
+        provider = ClaudeCLIProvider()
+        assert provider.get_context_length("unknown/model") is None
+
+    def test_has_cli_capability(self) -> None:
+        assert has_cli_capability(ClaudeCLIProvider())
+
+    def test_resolve_credentials_returns_none(self) -> None:
+        assert ClaudeCLIProvider().resolve_credentials() is None
+
+
+class TestCodexCLIProvider:
+    """Codex CLI provider — metadata, availability, and capability detection."""
+
+    def test_resolve_model_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SKILLSPECTOR_MODEL", raising=False)
+        assert CodexCLIProvider().resolve_model() == CodexCLIProvider.DEFAULT_MODEL
+
+    def test_resolve_model_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_MODEL", "o3")
+        assert CodexCLIProvider().resolve_model() == "o3"
+
+    def test_metadata_known_model(self) -> None:
+        provider = CodexCLIProvider()
+        assert provider.get_context_length("o4-mini") == 200_000
+        assert provider.get_max_output_tokens("o4-mini") == 100_000
+
+    def test_has_cli_capability(self) -> None:
+        assert has_cli_capability(CodexCLIProvider())
+
+    def test_resolve_credentials_returns_none(self) -> None:
+        assert CodexCLIProvider().resolve_credentials() is None
+
+
+class TestHasCliCapability:
+    """has_cli_capability duck-typing helper."""
+
+    def test_true_for_claude_cli(self) -> None:
+        assert has_cli_capability(ClaudeCLIProvider())
+
+    def test_true_for_codex_cli(self) -> None:
+        assert has_cli_capability(CodexCLIProvider())
+
+    def test_false_for_http_providers(self) -> None:
+        assert not has_cli_capability(AnthropicProvider())
+        assert not has_cli_capability(OpenAIProvider())
+        assert not has_cli_capability(NvBuildProvider())
+
+    def test_false_for_plain_object(self) -> None:
+        assert not has_cli_capability(object())
