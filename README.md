@@ -418,6 +418,61 @@ Options:
   --help                                       Show this message and exit
 ```
 
+## Integrating SkillSpector
+
+SkillSpector is built to be driven by other tools (CI pipelines, install gates, editor integrations). Its exit code and JSON output are a stable contract.
+
+### Exit codes
+
+`skillspector scan` exits with:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Scan completed, `risk_score` ≤ 50 (recommendation `SAFE` or `CAUTION`) |
+| `1` | Scan completed, `risk_score` > 50 (recommendation `DO_NOT_INSTALL`) |
+| `2` | Error (bad input, unreadable source, internal failure) |
+
+> The exit code collapses `SAFE` and `CAUTION` into `0`. To act differently on them (e.g. *warn* on `CAUTION` but *block* on `DO_NOT_INSTALL`), read the `recommendation` field from the JSON output rather than relying on the exit code.
+
+### Machine-readable output
+
+`--format json` produces a JSON report; with no `--output`/`-o` it is written to stdout:
+
+```bash
+skillspector scan ./my-skill/ --format json
+```
+
+The top-level shape is (this example shows a full LLM-backed scan; with `--no-llm`, `metadata.llm_requested` is `false`):
+
+```json
+{
+  "skill": { "name": "...", "source": "...", "scanned_at": "<ISO 8601>" },
+  "risk_assessment": { "score": 0, "severity": "LOW", "recommendation": "SAFE" },
+  "components": [ { "path": "...", "type": "...", "lines": 0, "executable": false, "size_bytes": 0 } ],
+  "issues": [ { "id": "...", "category": "...", "severity": "...", "confidence": 0.0, "location": { "file": "...", "start_line": 0 } } ],
+  "metadata": { "has_executable_scripts": false, "skillspector_version": "...", "llm_requested": true, "llm_available": true }
+}
+```
+
+- `risk_assessment.severity` ∈ `LOW | MEDIUM | HIGH | CRITICAL`.
+- `risk_assessment.recommendation` ∈ `SAFE | CAUTION | DO_NOT_INSTALL`, mapped from severity: `LOW → SAFE`, `MEDIUM → CAUTION`, `HIGH`/`CRITICAL → DO_NOT_INSTALL`.
+- `metadata.llm_error` appears only when LLM analysis was requested but unavailable.
+- The full per-issue shape is defined by `Finding.to_dict()` in [models.py](src/skillspector/models.py); rely on the fields above and treat any additional fields as best-effort.
+
+For CI/IDE tooling, `--format sarif` emits SARIF 2.1.0.
+
+### Recommended gate mapping
+
+When using SkillSpector as an install gate, map the recommendation to an action:
+
+| `recommendation` | Suggested action |
+|------------------|------------------|
+| `SAFE` | allow |
+| `CAUTION` | prompt / warn the user |
+| `DO_NOT_INSTALL` | block |
+
+SkillSpector computes the score band and recommendation; how strict the gate is (e.g. whether `CAUTION` blocks in CI) is a policy decision for the integrating tool.
+
 ## Development
 
 ### Setup
@@ -475,6 +530,15 @@ SC4 uses the [OSV.dev](https://osv.dev) API to check dependencies against the fu
 - **Caching** — results are cached in-memory for 1 hour to avoid redundant API calls during a session.
 
 The tool requires outbound HTTPS access to `api.osv.dev` for live vulnerability data. When that is not available, findings are limited to the static fallback list.
+
+## Trust model and data egress
+
+SkillSpector is defense-in-depth, not a sandbox. Know what it does and does not do before relying on it:
+
+- **It never executes the scanned skill.** All analysis is static (regex, Python AST, YARA) plus optional LLM evaluation of file *contents* — the skill's code is never run.
+- **LLM analysis sends file contents to the configured provider.** When LLM analysis is enabled (the default), file contents are sent to the active `SKILLSPECTOR_PROVIDER` endpoint. Use `--no-llm` to keep contents local (static analysis only).
+- **SC4 sends dependency names to OSV.dev.** The supply-chain check queries [OSV.dev](https://osv.dev) with the package names and versions the skill declares, to look up known CVEs. This is fundamental to the check and runs even with `--no-llm`. It sends dependency coordinates (not file contents), requires no API key, and falls back to a bundled list when OSV.dev is unreachable.
+- **It does not sandbox the host.** SkillSpector flags risky patterns *before* you install a skill; it does not contain or isolate a skill you choose to install anyway.
 
 ## Limitations
 

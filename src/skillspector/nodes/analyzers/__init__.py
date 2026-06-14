@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Analyzer node registry for Skillspector v2 stub workflow."""
+"""Analyzer node registry for the Skillspector workflow."""
 
 from __future__ import annotations
 
