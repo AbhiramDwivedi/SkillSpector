@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: CI
+
+on:
+  pull_request:
+    branches: ["main"]
+  push:
+    branches: ["main"]
+
+jobs:
+  lint-and-test:
+    name: Lint & Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    # Windows is excluded: the test suite has known path-separator failures
+    # in build_context that are out of scope for this workflow.
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Lint with ruff
+        run: uv run ruff check src/ tests/
+
+      - name: Check formatting with ruff
+        run: uv run ruff format --check src/ tests/
+
+      - name: Run unit tests
+        run: uv run pytest -m "not integration"
+
+      - name: Run unit tests with coverage
+        run: uv run pytest -m "not integration" --cov=src/skillspector --cov-report=term-missing
+
+  dco:
+    name: DCO Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify DCO sign-off on all commits
+        run: |
+          BASE=${{ github.event.pull_request.base.sha }}
+          HEAD=${{ github.event.pull_request.head.sha }}
+          MISSING=$(git log --pretty=format:"%H %s" "${BASE}..${HEAD}" | while read -r sha msg; do
+            if ! git log -1 --format="%B" "$sha" | grep -q "^Signed-off-by:"; then
+              echo "  $sha: $msg"
+            fi
+          done)
+          if [ -n "$MISSING" ]; then
+            echo "The following commits are missing Signed-off-by trailers:"
+            echo "$MISSING"
+            echo ""
+            echo "Please add a DCO sign-off (git commit -s) to all commits."
+            exit 1
+          fi
+          echo "All commits have DCO sign-off."
