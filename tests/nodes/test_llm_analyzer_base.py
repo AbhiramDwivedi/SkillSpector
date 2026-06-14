@@ -1086,6 +1086,193 @@ class TestLLMMetaAnalyzerApplyFilter:
 
 
 # ---------------------------------------------------------------------------
+# LLMMetaAnalyzer.apply_filter — severity-gated suppression floor
+#
+# Security invariant: CRITICAL and HIGH static findings must survive LLM
+# filtering even if the LLM (operating on attacker-controlled skill content)
+# omits or denies them.  MEDIUM/LOW findings are still filtered normally.
+# ---------------------------------------------------------------------------
+
+
+class TestApplyFilterSeverityFloor:
+    """Tests for the severity-gated suppression floor in apply_filter.
+
+    Verifies that CRITICAL/HIGH static findings are never silently dropped
+    by the LLM filter (adversarial prompt-injection defence), while MEDIUM/LOW
+    findings continue to be filtered as before.
+    """
+
+    MODEL = "nvidia/openai/gpt-oss-120b"
+
+    def _make_finding(
+        self,
+        rule_id: str,
+        severity: str,
+        file: str = "skill.md",
+        line: int = 1,
+        tags: list[str] | None = None,
+    ) -> Finding:
+        return Finding(
+            rule_id=rule_id,
+            message=f"original message for {rule_id}",
+            severity=severity,
+            confidence=0.8,
+            file=file,
+            start_line=line,
+            tags=tags or [],
+        )
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    def test_critical_unconfirmed_kept_with_llm_unconfirmed_tag(self) -> None:
+        """A CRITICAL static finding NOT confirmed by the LLM must be kept.
+
+        The finding must appear in the output with its original severity and
+        message, and the tag 'llm-unconfirmed' must be present to let consumers
+        know it was not LLM-validated (and may represent an adversarial suppression).
+        """
+        analyzer = LLMMetaAnalyzer(model=self.MODEL)
+        finding = self._make_finding("CRIT-001", "CRITICAL", line=10)
+        batch = Batch(file_path="skill.md", content="code", findings=[finding])
+        # LLM response: is_vulnerability=False — the LLM denies the finding
+        llm_items = [
+            {
+                "pattern_id": "CRIT-001",
+                "start_line": 10,
+                "is_vulnerability": False,
+                "confidence": 0.2,
+                "_file": "skill.md",
+            }
+        ]
+        result = analyzer.apply_filter([finding], [(batch, llm_items)])
+
+        assert len(result) == 1, "CRITICAL finding must NOT be dropped by LLM filtering"
+        kept = result[0]
+        assert kept.severity == "CRITICAL"
+        assert kept.rule_id == "CRIT-001"
+        assert kept.message == "original message for CRIT-001"
+        assert kept.confidence == 0.8  # original confidence preserved
+        assert "llm-unconfirmed" in kept.tags
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    def test_high_unconfirmed_kept_with_llm_unconfirmed_tag(self) -> None:
+        """A HIGH static finding NOT confirmed by the LLM must be kept.
+
+        Same invariant as CRITICAL: the original finding is preserved and
+        tagged 'llm-unconfirmed'.
+        """
+        analyzer = LLMMetaAnalyzer(model=self.MODEL)
+        finding = self._make_finding("HIGH-001", "HIGH", line=5)
+        batch = Batch(file_path="skill.md", content="code", findings=[finding])
+        # LLM response: finding completely omitted (empty list) — simulates
+        # a prompt-injection payload making the LLM silently drop the finding
+        llm_items: list[dict] = []
+        result = analyzer.apply_filter([finding], [(batch, llm_items)])
+
+        assert len(result) == 1, "HIGH finding must NOT be dropped by LLM filtering"
+        kept = result[0]
+        assert kept.severity == "HIGH"
+        assert kept.rule_id == "HIGH-001"
+        assert kept.message == "original message for HIGH-001"
+        assert kept.confidence == 0.8  # original confidence preserved
+        assert "llm-unconfirmed" in kept.tags
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    def test_medium_unconfirmed_still_dropped(self) -> None:
+        """A MEDIUM static finding NOT confirmed by the LLM must still be dropped.
+
+        The severity floor only applies to CRITICAL/HIGH.  MEDIUM and LOW
+        findings remain subject to normal LLM filtering (false-positive reduction).
+        """
+        analyzer = LLMMetaAnalyzer(model=self.MODEL)
+        finding = self._make_finding("MED-001", "MEDIUM", line=3)
+        batch = Batch(file_path="skill.md", content="code", findings=[finding])
+        llm_items = [
+            {
+                "pattern_id": "MED-001",
+                "start_line": 3,
+                "is_vulnerability": False,
+                "confidence": 0.1,
+                "_file": "skill.md",
+            }
+        ]
+        result = analyzer.apply_filter([finding], [(batch, llm_items)])
+
+        assert len(result) == 0, "MEDIUM finding must be dropped when LLM does not confirm it"
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    def test_low_unconfirmed_still_dropped(self) -> None:
+        """A LOW static finding NOT confirmed by the LLM must still be dropped."""
+        analyzer = LLMMetaAnalyzer(model=self.MODEL)
+        finding = self._make_finding("LOW-001", "LOW", line=7)
+        batch = Batch(file_path="skill.md", content="code", findings=[finding])
+        llm_items: list[dict] = []  # LLM omits the finding entirely
+        result = analyzer.apply_filter([finding], [(batch, llm_items)])
+
+        assert len(result) == 0, "LOW finding must be dropped when LLM does not confirm it"
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    def test_critical_confirmed_uses_llm_enrichment(self) -> None:
+        """A CRITICAL finding confirmed by the LLM is still enriched as before.
+
+        The floor does not interfere with the normal happy path: when the LLM
+        confirms a CRITICAL/HIGH finding, the enriched version (with LLM
+        explanation/remediation/confidence) is used and 'llm-unconfirmed' is
+        NOT added.
+        """
+        analyzer = LLMMetaAnalyzer(model=self.MODEL)
+        finding = self._make_finding("CRIT-002", "CRITICAL", line=20)
+        batch = Batch(file_path="skill.md", content="code", findings=[finding])
+        llm_items = [
+            {
+                "pattern_id": "CRIT-002",
+                "start_line": 20,
+                "is_vulnerability": True,
+                "confidence": 0.95,
+                "explanation": "LLM-confirmed dangerous pattern",
+                "remediation": "Remove immediately",
+                "_file": "skill.md",
+            }
+        ]
+        result = analyzer.apply_filter([finding], [(batch, llm_items)])
+
+        assert len(result) == 1
+        kept = result[0]
+        assert kept.severity == "CRITICAL"
+        assert kept.rule_id == "CRIT-002"
+        assert kept.explanation == "LLM-confirmed dangerous pattern"
+        assert kept.confidence == 0.95
+        assert "llm-unconfirmed" not in kept.tags
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    def test_llm_unconfirmed_tag_not_duplicated(self) -> None:
+        """If the original finding already has 'llm-unconfirmed' in its tags,
+        apply_filter must not append it again."""
+        analyzer = LLMMetaAnalyzer(model=self.MODEL)
+        finding = self._make_finding(
+            "CRIT-003", "CRITICAL", line=1, tags=["llm-unconfirmed", "existing-tag"]
+        )
+        batch = Batch(file_path="skill.md", content="code", findings=[finding])
+        llm_items: list[dict] = []  # LLM omits finding
+        result = analyzer.apply_filter([finding], [(batch, llm_items)])
+
+        assert len(result) == 1
+        assert result[0].tags.count("llm-unconfirmed") == 1
+
+    @patch(MOCK_PATCH_TARGET, _mock_get_chat_model)
+    def test_llm_unconfirmed_tag_surfaced_in_to_dict(self) -> None:
+        """The 'llm-unconfirmed' marker must be visible in the JSON output
+        (Finding.to_dict), so consumers can see a high-severity finding the LLM
+        did not confirm."""
+        analyzer = LLMMetaAnalyzer(model=self.MODEL)
+        finding = self._make_finding("CRIT-004", "CRITICAL", line=1)
+        batch = Batch(file_path="skill.md", content="code", findings=[finding])
+        result = analyzer.apply_filter([finding], [(batch, [])])
+
+        assert len(result) == 1
+        assert "llm-unconfirmed" in result[0].to_dict()["tags"]
+
+
+# ---------------------------------------------------------------------------
 # LLMMetaAnalyzer.run_batches (mocked LLM)
 # ---------------------------------------------------------------------------
 
