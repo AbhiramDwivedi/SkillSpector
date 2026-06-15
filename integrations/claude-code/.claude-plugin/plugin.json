@@ -1,0 +1,10 @@
+{
+  "name": "skillspector-guardrail",
+  "version": "0.1.0",
+  "description": "Scan AI agent skills with SkillSpector before the agent installs them; block high-risk skills.",
+  "author": { "name": "Abhiram Dwivedi" },
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/AbhiramDwivedi/SkillSpector",
+  "repository": "https://github.com/AbhiramDwivedi/SkillSpector",
+  "keywords": ["security", "skills", "guardrail", "skillspector"]
+}
