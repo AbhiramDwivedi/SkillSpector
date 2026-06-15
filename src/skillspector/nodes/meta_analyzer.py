@@ -75,11 +75,9 @@ class MetaAnalyzerFinding(BaseModel):
 
 
 class OverallAssessment(BaseModel):
-    """Overall risk assessment for the analyzed file."""
-
-    risk_level: str = Field(description="Overall risk level: LOW, MEDIUM, HIGH, or CRITICAL")
-    summary: str = Field(description="Brief summary of findings")
-
+    risk_level: Literal["LOW","MEDIUM","HIGH","CRITICAL"] = Field(
+        description="Overall risk level"
+    )
 
 class MetaAnalyzerResult(BaseModel):
     """Top-level structured response from the meta-analyzer LLM."""
@@ -94,7 +92,9 @@ class MetaAnalyzerResult(BaseModel):
         if isinstance(v, str):
             try:
                 return json.loads(v)
-            except (json.JSONDecodeError, TypeError):
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.warning("Failed to parse overall_assessment : %s", e)
+                
                 return None
         return v
 
