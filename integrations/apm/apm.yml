@@ -1,0 +1,17 @@
+# Microsoft APM (Agent Package Manager) manifest.
+# Distributes the SkillSpector guardrail skill across APM-supported harnesses.
+# Docs: https://microsoft.github.io/apm/
+name: skillspector-guardrail
+version: 0.1.0
+description: >
+  Scan AI agent skills with SkillSpector before trusting them, and gate
+  installs in CI on the risk recommendation.
+author: AbhiramDwivedi
+type: skill
+includes: auto
+dependencies:
+  apm: []
+  mcp: []
+# `apm run scan` -- convenience: static-scan the current package.
+scripts:
+  scan: skillspector scan . --no-llm --format json

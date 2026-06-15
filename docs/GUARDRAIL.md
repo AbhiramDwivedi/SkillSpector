@@ -34,11 +34,16 @@ A skill gets installed two ways, and a single mechanism can't cover both:
 | Surface | Covers | Mechanism | Lives in |
 |---------|--------|-----------|----------|
 | **Agent-initiated** | The agent installs/fetches a skill mid-session | Claude Code **plugin**: PreToolUse hook (+ skill + command) | `integrations/claude-code/` |
-| **Human / CI-initiated** | A person or pipeline runs the package manager | **APM**: `apm.yml` + policy / pre-install hook calling SkillSpector | `integrations/apm/` |
+| **Human / CI-initiated** | A person or pipeline runs the package manager | **APM**: `apm.yml` distributes the skill; a **CI gate** (`skillspector scan`) enforces | `integrations/apm/` |
 
 **Enforcement boundary (important):** a Claude Code hook fires only on the *agent's* tool calls
 within a session — it cannot stop a human running `claude plugin install` / `git clone` in their own
 terminal. APM covers that human/CI path. The guardrail is **defense-in-depth, not a sandbox**.
+
+**Verified APM constraint:** APM hooks are advisory and cannot block an install, and `apm-policy.yml`
+enforces only static allow/deny lists — neither can call an external scanner. So the APM-side gate is
+a **CI check** built on SkillSpector's exit code (`1` on `DO_NOT_INSTALL`), not an inline pre-install
+hook. See [`../integrations/apm/ci-gate.md`](../integrations/apm/ci-gate.md).
 
 ## How the gate scans (cheap + local)
 

@@ -1,22 +1,33 @@
 # SkillSpector — Microsoft APM package
 
-Distributes the guardrail via [Microsoft APM](https://microsoft.github.io/apm/) across harnesses,
-and — where APM supports it — wires SkillSpector behind a policy / pre-install hook so
-**human- and CI-initiated** installs are gated too. That's the path a Claude Code hook can't reach.
+Distributes the guardrail skill via [Microsoft APM](https://microsoft.github.io/apm/) across
+APM-supported harnesses, and gates **human- and CI-initiated** installs — the path a Claude Code
+hook can't reach.
 
-Planned structure:
+## What we verified (and what it means)
+
+We checked the APM docs before building. The result reshaped the design:
+
+- **APM hooks cannot block an install.** They're advisory — deployed to the harness and run *after*
+  install; there is no `PreInstall` hook.
+- **`apm-policy.yml` *can* block** (`enforcement: block` aborts before files are written), but it
+  enforces only **static** dependency allow/deny lists — it cannot invoke an external scanner like
+  `skillspector scan`.
+- **So enforcement lives in CI**, using SkillSpector's stable contract: `skillspector scan` exits `1`
+  on `DO_NOT_INSTALL` (`risk_score > 50`), which fails the build. Optionally, SkillSpector's SARIF can
+  be ingested via `apm audit --external` (experimental).
+
+## Contents
 
 ```
-apm.yml            # package manifest
-apm-policy.yml     # policy gate invoking SkillSpector (pending blocking-semantics verification)
-.apm/
-  hooks/           # pre-install hook running `skillspector scan`
+apm.yml                                  # package manifest (distribution)
+.apm/skills/skillspector-scan/SKILL.md   # the scan skill, deployed across harnesses
+ci-gate.md                               # the enforcement recipe (CI)
 ```
+
+- **Distribution:** `apm install skillspector-guardrail` (from this package) deploys the scan skill to
+  whatever harness APM targets.
+- **Enforcement:** see [`ci-gate.md`](ci-gate.md) — add `skillspector scan` as a required CI check
+  around `apm install`.
 
 See [../../docs/GUARDRAIL.md](../../docs/GUARDRAIL.md).
-
-> **Open question to verify during build:** whether an APM policy / pre-install hook can actually
-> *block* an install on a non-zero result, or is advisory-only. If it can't block, this degrades to
-> distribution + advisory scanning, and enforcement leans on the built-in APM pre-deploy scan.
-
-**Status:** scaffolding.
