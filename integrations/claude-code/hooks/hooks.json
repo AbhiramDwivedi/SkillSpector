@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/scan_gate.py\"",
+            "timeout": 130,
+            "statusMessage": "SkillSpector: scanning skill before install..."
+          }
+        ]
+      }
+    ]
+  }
+}

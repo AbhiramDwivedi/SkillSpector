@@ -1,0 +1,11 @@
+{
+  "name": "skillspector",
+  "owner": { "name": "Abhiram Dwivedi" },
+  "plugins": [
+    {
+      "name": "skillspector-guardrail",
+      "source": "./integrations/claude-code",
+      "description": "Scan AI agent skills with SkillSpector before install; block high-risk skills."
+    }
+  ]
+}
