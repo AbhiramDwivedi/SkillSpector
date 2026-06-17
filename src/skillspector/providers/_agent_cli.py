@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hardened subprocess helper for agent CLI providers (claude, codex).
+"""Hardened subprocess helper for agent CLI providers (claude, codex, gemini).
 
-This is the single security chokepoint for all agent-CLI calls. Every
-call goes through :func:`run_agent_cli` which enforces:
+This is the single security chokepoint for all agent-CLI calls. Per-CLI
+knowledge (argv, output parsing, auth check) lives in a small ``CliSpec``
+registry (see ``_REGISTRY`` / "HOW TO ADD A NEW AGENT CLI" below); the
+security core is CLI-agnostic. Every call goes through :func:`run_agent_cli`
+which enforces:
 
 - **No shell**: ``shell=False`` with an explicit argv list.
 - **Untrusted content via stdin only**: the prompt (which may contain
@@ -50,6 +53,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from skillspector.logging_config import get_logger
@@ -270,7 +275,7 @@ def _parse_claude_output(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _build_codex_argv(binary: str, model: str) -> list[str]:
+def _build_codex_argv(binary: str, model: str, max_output_tokens: int = 0) -> list[str]:
     """Build the argv list for a capability-stripped ``codex exec`` call.
 
     Flags chosen (verified against ``codex exec --help``):
@@ -349,6 +354,157 @@ def _parse_codex_output(raw: str) -> str:
             f"codex returned no assistant message in JSONL output; raw={raw[:400]!r}"
         )
     return last_text
+
+
+# ---------------------------------------------------------------------------
+# Gemini CLI invocation  (FLAGS UNVERIFIED — see note)
+# ---------------------------------------------------------------------------
+
+
+def _build_gemini_argv(binary: str, model: str, max_output_tokens: int = 0) -> list[str]:
+    """Build a capability-stripped, non-interactive Gemini CLI argv.
+
+    FLAGS UNVERIFIED — the Gemini CLI was not installed in the dev environment
+    where this was written. TODO(verify): confirm every flag against
+    ``gemini --help`` on a machine with the CLI before relying on this provider.
+
+    Intent (mirrors claude/codex): non-interactive, NO tool execution, NO
+    auto-approve (``--yolo`` is deliberately absent), output parseable as JSON.
+    The prompt is delivered via stdin by :func:`run_agent_cli`, never in argv.
+    Because the runner is fail-closed, a wrong flag only makes the CLI error out
+    (non-zero exit / unparseable output) — it cannot weaken the security model.
+    """
+    validated_model = _validate_model_label(model)
+    return [
+        binary,
+        "--model",
+        validated_model,
+        "--output-format",
+        "json",
+        # Deliberately absent: --yolo / any auto-approve, tool/extension enable.
+        # TODO(verify): a flag may be needed to read the prompt from stdin.
+    ]
+
+
+def _parse_gemini_output(raw: str) -> str:
+    """Extract assistant text from Gemini CLI output (UNVERIFIED shape).
+
+    Tries JSON first (common keys), else returns the raw text. TODO(verify)
+    against real ``gemini --output-format json`` output.
+    """
+    text = raw.strip()
+    if not text:
+        raise AgentCLIError("gemini returned empty stdout")
+    try:
+        obj: Any = json.loads(text)
+    except json.JSONDecodeError:
+        return text  # assume plain-text mode
+    if isinstance(obj, dict):
+        for key in ("response", "text", "content", "result", "output"):
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Per-CLI authentication probes (cheap, local — run once per scan)
+# ---------------------------------------------------------------------------
+
+
+def _claude_auth_check(binary: str) -> tuple[bool, str | None]:
+    """Check claude is authenticated via ``claude auth status`` (no inference)."""
+    try:
+        result = subprocess.run(
+            [binary, "auth", "status"], capture_output=True, shell=False, timeout=15
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        return False, f"claude auth status check failed: {exc}"
+    out = (result.stdout or b"").decode("utf-8", errors="replace").strip()
+    try:
+        logged_in = bool(json.loads(out).get("loggedIn"))
+    except (json.JSONDecodeError, AttributeError):
+        logged_in = result.returncode == 0 and "not logged in" not in out.lower()
+    if result.returncode != 0 or not logged_in:
+        return False, "claude is not authenticated (run `claude auth login`)"
+    return True, None
+
+
+def _codex_auth_check(binary: str) -> tuple[bool, str | None]:
+    """Check codex is authenticated via ``codex login status`` (no inference)."""
+    try:
+        result = subprocess.run(
+            [binary, "login", "status"], capture_output=True, shell=False, timeout=15
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        return False, f"codex login status check failed: {exc}"
+    out = (result.stdout or b"").decode("utf-8", errors="replace").lower()
+    if result.returncode != 0 or "not logged in" in out:
+        return False, "codex is not authenticated (run `codex login`)"
+    return True, None
+
+
+def _gemini_auth_check(binary: str) -> tuple[bool, str | None]:
+    """Gemini auth probe (UNVERIFIED).
+
+    The Gemini CLI's auth-status command is not confirmed, so we treat
+    binary-on-PATH as available and let the first real call fail closed if auth
+    is missing. TODO(verify): replace with a real ``gemini`` auth/status check.
+    """
+    return True, None
+
+
+# ---------------------------------------------------------------------------
+# CLI registry
+#
+# HOW TO ADD A NEW AGENT CLI (no changes to run_agent_cli or the security core):
+#   1. Write three small functions above:
+#        _build_<name>_argv(binary, model, max_output_tokens) -> argv
+#        _parse_<name>_output(raw) -> str
+#        _<name>_auth_check(binary) -> (available, reason)
+#      Keep the security posture: no shell, NO tool execution, NO auto-approve,
+#      prompt via stdin (run_agent_cli handles stdin), fail-closed on any error.
+#   2. Add a CliSpec entry to _REGISTRY below.
+#   3. Add a ~5-line provider subclass of AgentCLIProviderBase under
+#      providers/<name>_cli/ with a bundled model_registry.yaml.
+#   4. Register it in providers/__init__.py:_select_active_provider.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CliSpec:
+    """Everything provider-specific about one agent CLI, behind one lookup."""
+
+    binary: str
+    build_argv: Callable[[str, str, int], list[str]]
+    parse_output: Callable[[str], str]
+    auth_check: Callable[[str], tuple[bool, str | None]]
+
+
+_REGISTRY: dict[str, CliSpec] = {
+    "claude": CliSpec("claude", _build_claude_argv, _parse_claude_output, _claude_auth_check),
+    "codex": CliSpec("codex", _build_codex_argv, _parse_codex_output, _codex_auth_check),
+    "gemini": CliSpec("gemini", _build_gemini_argv, _parse_gemini_output, _gemini_auth_check),
+}
+
+
+def get_spec(name: str) -> CliSpec:
+    """Return the :class:`CliSpec` for *name*, or raise for an unknown CLI."""
+    spec = _REGISTRY.get(name)
+    if spec is None:
+        raise AgentCLIError(
+            f"unsupported agent CLI {name!r}; known: {', '.join(sorted(_REGISTRY))}"
+        )
+    return spec
+
+
+def is_available(binary_name: str) -> tuple[bool, str | None]:
+    """Return ``(available, reason)``: the binary is on PATH AND authenticated."""
+    spec = get_spec(binary_name)
+    binary = find_binary(spec.binary)
+    if binary is None:
+        return False, f"{spec.binary!r} binary not found on PATH"
+    return spec.auth_check(binary)
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +636,8 @@ def run_agent_cli(
       killed if it exceeds the cap (no unbounded buffering).
 
     Args:
-        binary_name: ``"claude"`` or ``"codex"``.
+        binary_name: A registered agent CLI name (see ``_REGISTRY``), e.g.
+                     ``"claude"``, ``"codex"``, or ``"gemini"``.
         prompt:       The complete prompt string. Delivered to the CLI via
                       stdin only — never placed in argv.
         model:        Model label (e.g. ``"claude-sonnet-4-6"``).
@@ -494,10 +651,11 @@ def run_agent_cli(
         AgentCLIError: on any failure (missing binary, non-zero exit,
             timeout, empty / malformed output).
     """
-    binary = find_binary(binary_name)
+    spec = get_spec(binary_name)
+    binary = find_binary(spec.binary)
     if binary is None:
         raise AgentCLIError(
-            f"{binary_name!r} binary not found on PATH; "
+            f"{spec.binary!r} binary not found on PATH; "
             "install it or use a different SKILLSPECTOR_PROVIDER"
         )
 
@@ -508,13 +666,8 @@ def run_agent_cli(
             f"prompt exceeds MAX_INPUT_BYTES ({MAX_INPUT_BYTES}); got {len(prompt_bytes)} bytes"
         )
 
-    # -- Build argv (no untrusted content here) --------------------------------
-    if binary_name == "claude":
-        argv = _build_claude_argv(binary, model, max_output_tokens)
-    elif binary_name == "codex":
-        argv = _build_codex_argv(binary, model)
-    else:
-        raise AgentCLIError(f"unsupported binary_name: {binary_name!r}")
+    # -- Build argv via the registry (no untrusted content here) ---------------
+    argv = spec.build_argv(binary, model, max_output_tokens)
 
     # -- Scrub environment ----------------------------------------------------
     child_env = _scrub_env()
@@ -561,7 +714,5 @@ def run_agent_cli(
 
     raw_text = stdout_raw.decode("utf-8", errors="replace")
 
-    # -- Parse envelope -------------------------------------------------------
-    if binary_name == "claude":
-        return _parse_claude_output(raw_text)
-    return _parse_codex_output(raw_text)
+    # -- Parse envelope via the registry --------------------------------------
+    return spec.parse_output(raw_text)

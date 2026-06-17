@@ -622,3 +622,58 @@ class TestRunBounded:
         rc, _out, _err, overflow = _run_bounded(proc, b"", timeout=1)
         assert rc is None
         assert overflow is False
+
+
+# ---------------------------------------------------------------------------
+# CLI registry + multi-CLI extensibility
+# ---------------------------------------------------------------------------
+
+
+class TestCliRegistry:
+    def test_registry_covers_known_clis(self) -> None:
+        assert set(_agent_cli._REGISTRY) == {"claude", "codex", "gemini"}
+
+    def test_get_spec_returns_matching_binary(self) -> None:
+        for name in ("claude", "codex", "gemini"):
+            assert _agent_cli.get_spec(name).binary == name
+
+    def test_get_spec_unknown_raises(self) -> None:
+        with pytest.raises(AgentCLIError, match="unsupported agent CLI"):
+            _agent_cli.get_spec("nope")
+
+    def test_is_available_unknown_raises(self) -> None:
+        with pytest.raises(AgentCLIError):
+            _agent_cli.is_available("nope")
+
+    def test_is_available_false_when_binary_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(_agent_cli, "find_binary", lambda _name: None)
+        ok, reason = _agent_cli.is_available("gemini")
+        assert ok is False
+        assert "not found" in (reason or "")
+
+    def test_gemini_cli_provider_selects(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILLSPECTOR_PROVIDER", "gemini_cli")
+        from skillspector.providers import get_metadata_provider
+        from skillspector.providers.gemini_cli import GeminiCLIProvider
+
+        assert isinstance(get_metadata_provider(), GeminiCLIProvider)
+
+
+class TestGeminiArgv:
+    """Structural checks only — gemini flags are UNVERIFIED, but the security
+    invariants (no bypass flags, model validated) must still hold."""
+
+    def test_argv_has_binary_and_model_no_bypass(self) -> None:
+        argv = _agent_cli._build_gemini_argv("gemini", "gemini-2.5-pro", 4096)
+        assert argv[0] == "gemini"
+        assert "--model" in argv and "gemini-2.5-pro" in argv
+        full = " ".join(argv)
+        assert "yolo" not in full and "dangerously" not in full
+
+    def test_model_label_validated_against_injection(self) -> None:
+        with pytest.raises(AgentCLIError):
+            _agent_cli._build_gemini_argv("gemini", "--inject", 4096)
+
+    def test_parse_handles_json_and_plaintext(self) -> None:
+        assert _agent_cli._parse_gemini_output('{"response": "hi"}') == "hi"
+        assert _agent_cli._parse_gemini_output("plain text reply") == "plain text reply"
