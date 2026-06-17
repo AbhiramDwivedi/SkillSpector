@@ -1,0 +1,13 @@
+# Token-budget metadata for the GeminiCLIProvider (local ``gemini`` binary).
+# EXPERIMENTAL / UNVERIFIED — confirm model ids and context/output limits
+# against the real Gemini CLI before relying on these values. When a model is
+# not listed, callers fall back to the package-wide defaults in constants.py.
+
+models:
+  "gemini-2.5-pro":
+    context_length: 1048576
+    max_output_tokens: 65536
+
+  "gemini-2.5-flash":
+    context_length: 1048576
+    max_output_tokens: 65536

@@ -67,6 +67,10 @@ def _select_active_provider() -> ModelMetadataProvider:
         from .codex_cli import CodexCLIProvider
 
         return CodexCLIProvider()
+    if name == "gemini_cli":
+        from .gemini_cli import GeminiCLIProvider
+
+        return GeminiCLIProvider()
     if name in ("nv_inference", ""):
         # Try the optional nv_inference subpackage if it's bundled with
         # this installation; otherwise fall through to nv_build.
@@ -79,7 +83,8 @@ def _select_active_provider() -> ModelMetadataProvider:
 
     raise ValueError(
         f"Unknown SKILLSPECTOR_PROVIDER: {name!r}. "
-        "Expected one of: openai, anthropic, nv_build, claude_cli, codex_cli (or unset)."
+        "Expected one of: openai, anthropic, nv_build, claude_cli, codex_cli, "
+        "gemini_cli (or unset)."
     )
 
 
