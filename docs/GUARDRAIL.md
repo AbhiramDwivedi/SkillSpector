@@ -33,12 +33,44 @@ A skill gets installed two ways, and a single mechanism can't cover both:
 
 | Surface | Covers | Mechanism | Lives in |
 |---------|--------|-----------|----------|
-| **Agent-initiated** | The agent installs/fetches a skill mid-session | Claude Code **plugin**: PreToolUse hook (+ skill + command) | `integrations/claude-code/` |
+| **Agent-initiated** | The agent installs/fetches a skill mid-session | Pre-tool hook for Claude Code, Codex, Cursor, Gemini | `skillspector.gate` + `integrations/claude-code/` |
 | **Human / CI-initiated** | A person or pipeline runs the package manager | **APM**: `apm.yml` + policy / pre-install hook calling SkillSpector | `integrations/apm/` |
 
-**Enforcement boundary (important):** a Claude Code hook fires only on the *agent's* tool calls
+**Enforcement boundary (important):** a pre-tool hook fires only on the *agent's* tool calls
 within a session — it cannot stop a human running `claude plugin install` / `git clone` in their own
 terminal. APM covers that human/CI path. The guardrail is **defense-in-depth, not a sandbox**.
+
+## Supported agents & install triggers
+
+The gate logic lives once in the agent-agnostic `skillspector.gate` package; thin per-agent
+adapters translate each CLI's hook event/response schema (they all share the same shape — a command
+handler, the tool call as JSON on stdin, and a `deny` decision — so only the field names differ):
+
+| Agent | Hook event | Config | Install with |
+|-------|-----------|--------|--------------|
+| Claude Code | `PreToolUse` | `~/.claude/settings.json` | `skillspector install-hook --agent claude` (or the marketplace plugin) |
+| Codex CLI | `PreToolUse` | `~/.codex/config.toml` | `skillspector install-hook --agent codex` |
+| Cursor | `beforeShellExecution` | `~/.cursor/hooks.json` | `skillspector install-hook --agent cursor` |
+| Gemini CLI | `BeforeTool` | `~/.gemini/settings.json` | `skillspector install-hook --agent gemini` |
+
+`skillspector install-hook --agent all` configures every installed agent at once. Each installer is
+idempotent and writes a hook that runs `<python> -m skillspector.gate --agent <name>` using the
+interpreter that ran the installer, so the hook always resolves the `skillspector` package.
+
+The gate recognises these install commands in a tool call and scans the target before it runs:
+
+- `git clone <url>` — scanned directly.
+- `.zip` / `.tar(.gz|.bz2)` archive fetches (`curl`/`wget`) — scanned directly.
+- `apm install owner/repo` and `npx owner/repo` — mapped to `https://github.com/owner/repo` and scanned.
+- a bare `npx`/`apm` package (no repo slug) — not directly scannable, so surfaced as **ask** for review.
+
+> Gemini's hook has no interactive "ask", so a `CAUTION` result there fails safe to **deny** with a
+> reason (opt out with `SKILLSPECTOR_GATE_CAUTION=allow`). Cursor's `allow`/`ask` are unreliable in
+> some builds, but its `deny` — the direction that matters for a security gate — is honoured.
+
+The marketplace plugin under `integrations/claude-code/` ships a **self-contained** `scan_gate.py`
+(depends only on the `skillspector` CLI, not the importable package) so it works no matter how the
+scanner was installed; a consistency test keeps its detection in lock-step with the package.
 
 ## How the gate scans (cheap + local)
 

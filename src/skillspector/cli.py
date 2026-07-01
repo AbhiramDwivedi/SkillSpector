@@ -567,5 +567,61 @@ def baseline(
             _cleanup_result(result)
 
 
+class AgentChoice(StrEnum):
+    """Coding-agent CLIs whose install gate SkillSpector can configure."""
+
+    CLAUDE = "claude"
+    CODEX = "codex"
+    CURSOR = "cursor"
+    GEMINI = "gemini"
+    ALL = "all"
+
+
+@app.command("install-hook")
+def install_hook(
+    agent: Annotated[
+        AgentChoice,
+        typer.Option("--agent", "-a", help="Coding-agent CLI to configure, or 'all'."),
+    ] = AgentChoice.CLAUDE,
+    config_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            "--settings",
+            help="Override the agent's config file path (single agent only).",
+        ),
+    ] = None,
+) -> None:
+    """Install the SkillSpector pre-tool install gate into a coding-agent CLI.
+
+    Writes a hook that scans skill installs (git clone / npx / apm / archive
+    fetches) with SkillSpector before the agent proceeds, and blocks anything it
+    rates DO_NOT_INSTALL. Idempotent — safe to run repeatedly.
+
+    Supported agents: claude, codex, cursor, gemini (or ``all``). Start a new
+    agent session for the hook to take effect.
+    """
+    from skillspector.gate import install as gate_install
+
+    if agent == AgentChoice.ALL:
+        if config_path is not None:
+            console.print("[red]Error:[/red] --config cannot be combined with --agent all.")
+            raise typer.Exit(code=2)
+        agents = list(gate_install.INSTALLABLE_AGENTS)
+    else:
+        agents = [agent.value]
+
+    for name in agents:
+        try:
+            path, result = gate_install.install(name, config_path)
+        except (ValueError, OSError) as e:
+            console.print(f"[red]Error configuring {name}:[/red] {e}")
+            raise typer.Exit(code=2) from e
+        state = "already configured" if result == gate_install.ALREADY else "installed"
+        console.print(f"[green]OK[/green] {name}: gate {state} in {path}")
+
+    console.print("[dim]Start a new agent session for the hook to take effect.[/dim]")
+
+
 if __name__ == "__main__":
     app()

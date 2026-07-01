@@ -1,30 +1,50 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 Abhiram Dwivedi
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-"""SkillSpector PreToolUse gate for Claude Code.
+"""SkillSpector PreToolUse gate for Claude Code (self-contained plugin script).
 
 Reads a Claude Code PreToolUse hook event on stdin. When the agent's tool call
-fetches a skill from a *scannable* source (a ``git clone`` URL or a ``.zip``
-archive URL in a Bash command), it scans the target with ``skillspector scan``
-and returns an ``allow`` / ``ask`` / ``deny`` decision derived from the risk
-recommendation. For anything it does not recognise as a skill fetch, it stays
-out of the way (no decision) so normal commands are unaffected.
+installs a skill from a *scannable* source (a ``git clone`` URL, a ``.zip``/
+``.tar`` archive URL, or an ``apm``/``npx`` GitHub ``owner/repo`` slug), it scans
+the target with ``skillspector scan`` and returns an ``allow`` / ``ask`` / ``deny``
+decision from the risk recommendation. A non-scannable package install (a bare
+``npx``/``apm`` package) is surfaced for review (``ask``). Anything else is left
+alone so normal commands are unaffected.
 
-Decision policy (the recommendation maps directly to a decision):
+This script is intentionally **self-contained** — it depends only on the
+``skillspector`` CLI being on ``PATH`` (invoked as a subprocess), never on the
+``skillspector`` Python package being importable — so the marketplace plugin
+works no matter how the scanner was installed (pip, pipx, uv, …). Its detection
+mirrors :mod:`skillspector.gate` (the packaged multi-agent gate); a consistency
+test keeps the two in lock-step.
+
+Decision policy (recommendation maps directly to a decision)::
 
     SAFE            -> allow
     CAUTION         -> ask    (override via SKILLSPECTOR_GATE_CAUTION=allow|deny)
     DO_NOT_INSTALL  -> deny
 
-Failure modes:
-    skillspector not on PATH        -> allow + a warning (gate skipped; do not
-                                       break the user's workflow when the tool
-                                       isn't installed)
-    scan ran but failed/unparseable -> ask (fail toward caution)
+Failure modes::
+
+    skillspector not on PATH        -> allow + a warning (do not break workflows)
+    scan ran but failed/unparseable -> ask (fail toward review)
+    non-scannable package install   -> ask (surface for review)
 
 Security: the extracted target is passed to ``skillspector scan`` as an argv
-element with ``shell=False`` — it is never interpolated into a shell string, so
-a hostile command/URL cannot inject anything into the gate's own subprocess.
+element with ``shell=False`` — it is never interpolated into a shell string, so a
+hostile command/URL cannot inject anything into the gate's own subprocess.
 
 This is *defense-in-depth*: a PreToolUse hook only fires on the agent's tool
 calls within a session. It cannot intercept a human running an install in their
@@ -46,13 +66,26 @@ DO_NOT_INSTALL = "DO_NOT_INSTALL"
 
 SCAN_TIMEOUT_SECONDS = 120
 
-# `git clone [opts] <url> [dir]` — capture the first http(s)/git URL argument.
+# Detection mirrors skillspector.gate.extract_install_target (kept in sync by
+# tests/unit/test_claude_gate.py::TestConsistencyWithPackage).
 _GIT_CLONE = re.compile(
     r"\bgit\s+clone\b[^\n]*?\s(?P<url>(?:https?://|git://|git@)\S+)",
     re.IGNORECASE,
 )
-# A direct fetch of a skill archive (curl/wget <url>.zip).
-_ARCHIVE_URL = re.compile(r"(?P<url>https?://\S+\.zip)\b", re.IGNORECASE)
+_ARCHIVE_URL = re.compile(
+    r"(?P<url>https?://\S+\.(?:zip|tar\.gz|tgz|tar\.bz2|tar))\b",
+    re.IGNORECASE,
+)
+_REPO_SLUG = re.compile(
+    r"\b(?:apm\s+install|npx(?:\s+(?:-y|--yes|-p\s+\S+))*)\s+"
+    r"(?:github:)?(?P<slug>[\w.-]+/[\w.-]+)\b",
+    re.IGNORECASE,
+)
+_PKG_INSTALL = re.compile(
+    r"\b(?:npx\s+(?:-y\s+|--yes\s+|-p\s+\S+\s+)*(?P<npx>@?[\w./-]+)"
+    r"|apm\s+install\s+(?P<apm>@?[\w./-]+))",
+    re.IGNORECASE,
+)
 
 
 def _read_event() -> dict:
@@ -63,17 +96,37 @@ def _read_event() -> dict:
 
 
 def extract_target(tool_name: str, tool_input: dict) -> str | None:
-    """Return a scannable target (URL) if the tool call fetches a skill, else None.
+    """Return a scannable target URL if the tool call fetches a skill, else None.
 
-    Conservative on purpose: only acts on ``git clone`` URLs and ``.zip`` archive
-    URLs in Bash commands, both of which ``skillspector scan`` accepts directly.
-    Unrecognised commands return ``None`` so the gate does not interfere.
+    Recognises ``git clone`` URLs, ``.zip``/``.tar`` archive URLs, and
+    ``apm``/``npx`` GitHub ``owner/repo`` slugs (mapped to a repo URL) — all of
+    which ``skillspector scan`` accepts. A bare package install is not returned
+    here (it is not directly scannable); see :func:`unscannable_install`.
     """
     if tool_name != "Bash":
         return None
     command = str(tool_input.get("command") or "")
-    match = _GIT_CLONE.search(command) or _ARCHIVE_URL.search(command)
-    return match.group("url") if match else None
+    git = _GIT_CLONE.search(command)
+    if git:
+        return git.group("url")
+    archive = _ARCHIVE_URL.search(command)
+    if archive:
+        return archive.group("url")
+    slug = _REPO_SLUG.search(command)
+    if slug:
+        return f"https://github.com/{slug.group('slug')}"
+    return None
+
+
+def unscannable_install(tool_name: str, tool_input: dict) -> str | None:
+    """Return a package name for an npx/apm install with no scannable slug, else None."""
+    if tool_name != "Bash":
+        return None
+    command = str(tool_input.get("command") or "")
+    if _GIT_CLONE.search(command) or _ARCHIVE_URL.search(command) or _REPO_SLUG.search(command):
+        return None
+    pkg = _PKG_INSTALL.search(command)
+    return (pkg.group("npx") or pkg.group("apm")) if pkg else None
 
 
 def scan(target: str) -> tuple[str, dict | None]:
@@ -152,9 +205,20 @@ def main() -> int:
     if event.get("hook_event_name") != "PreToolUse":
         return 0  # not our event; defer
 
-    target = extract_target(str(event.get("tool_name") or ""), event.get("tool_input") or {})
-    if not target:
-        return 0  # not a skill fetch we recognise; do not interfere
+    tool_name = str(event.get("tool_name") or "")
+    tool_input = event.get("tool_input") or {}
+
+    target = extract_target(tool_name, tool_input)
+    if target is None:
+        package = unscannable_install(tool_name, tool_input)
+        if package is None:
+            return 0  # not a skill fetch we recognise; do not interfere
+        _emit(
+            "ask",
+            f"SkillSpector cannot pre-scan package install '{package}'; "
+            "review the source before installing.",
+        )
+        return 0
 
     status, report = scan(target)
     if status == "no_tool":

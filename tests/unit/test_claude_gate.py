@@ -1,5 +1,17 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 Abhiram Dwivedi
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Tests for the Claude Code PreToolUse gate (integrations/claude-code)."""
 
@@ -181,3 +193,82 @@ class TestMain:
         payload = json.loads(out)
         assert payload["hookSpecificOutput"]["permissionDecision"] == "allow"
         assert "systemMessage" in payload
+
+
+class TestExtendedDetection:
+    def test_targz_archive(self) -> None:
+        assert (
+            gate.extract_target("Bash", {"command": "wget https://e.com/s.tar.gz"})
+            == "https://e.com/s.tar.gz"
+        )
+
+    def test_apm_repo_slug(self) -> None:
+        assert (
+            gate.extract_target("Bash", {"command": "apm install owner/repo"})
+            == "https://github.com/owner/repo"
+        )
+
+    def test_npx_repo_slug(self) -> None:
+        assert (
+            gate.extract_target("Bash", {"command": "npx -y owner/repo"})
+            == "https://github.com/owner/repo"
+        )
+
+    def test_bare_package_is_unscannable(self) -> None:
+        assert gate.extract_target("Bash", {"command": "npx create-app"}) is None
+        assert gate.unscannable_install("Bash", {"command": "npx create-app"}) == "create-app"
+
+    def test_review_path_asks(self, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(
+            gate.sys,
+            "stdin",
+            io.StringIO(
+                json.dumps(
+                    {
+                        "hook_event_name": "PreToolUse",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "npx create-app"},
+                    }
+                )
+            ),
+        )
+        gate.main()
+        assert (
+            json.loads(capsys.readouterr().out)["hookSpecificOutput"]["permissionDecision"] == "ask"
+        )
+
+
+class TestConsistencyWithPackage:
+    """scan_gate.py detection must stay in lock-step with skillspector.gate.
+
+    The marketplace script is self-contained (cannot import the package at
+    runtime), so this test is the guard that keeps the duplicated detection from
+    silently diverging.
+    """
+
+    _CASES = [
+        "git clone https://github.com/x/y.git dst",
+        "git clone git@github.com:x/y.git",
+        "curl -O https://e.com/s.zip",
+        "wget https://e.com/s.tar.gz",
+        "apm install owner/repo",
+        "npx -y owner/repo",
+        "npx create-app",
+        "apm install lonelypkg",
+        "ls -la /tmp",
+        "npm run build",
+    ]
+
+    def test_matches_core(self) -> None:
+        from skillspector.gate import extract_install_target
+
+        for command in self._CASES:
+            core = extract_install_target(command)
+            script_scan = gate.extract_target("Bash", {"command": command})
+            script_review = gate.unscannable_install("Bash", {"command": command})
+            if core is None:
+                assert script_scan is None and script_review is None, command
+            elif core.kind == "scan":
+                assert script_scan == core.value and script_review is None, command
+            else:
+                assert script_scan is None and script_review == core.value, command
