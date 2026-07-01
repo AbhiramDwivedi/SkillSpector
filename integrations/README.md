@@ -5,8 +5,9 @@ the architecture.
 
 - [`claude-code/`](claude-code/) — Claude Code **plugin**: scans a skill before the agent installs
   it and returns allow / ask / deny. Covers **agent-initiated** installs.
-- **Multi-agent gate** (`skillspector.gate`) — the same pre-tool gate for Claude Code, Codex, Cursor,
-  and Gemini. Install with `skillspector install-hook --agent {claude,codex,cursor,gemini,all}`.
+- **Multi-agent gate** (`skillspector.gate`) — the same pre-tool gate for [`codex/`](codex/),
+  [`cursor/`](cursor/), and [`gemini/`](gemini/) (Claude Code uses the plugin above). Install with
+  `skillspector install-hook --agent {claude,codex,cursor,gemini,all}`.
 - [`apm/`](apm/) — Microsoft **APM** package + policy gate. Covers **human / CI-initiated** installs.
 
 Both call `skillspector scan … --format json` and act on `risk_assessment.recommendation`

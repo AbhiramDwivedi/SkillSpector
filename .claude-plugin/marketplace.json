@@ -1,6 +1,6 @@
 {
   "name": "skillspector",
-  "owner": { "name": "Abhiram Dwivedi" },
+  "owner": { "name": "NVIDIA", "url": "https://github.com/NVIDIA/SkillSpector" },
   "plugins": [
     {
       "name": "skillspector-guardrail",
