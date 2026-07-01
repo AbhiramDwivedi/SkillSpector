@@ -312,3 +312,62 @@ class TestMainDispatch:
             capsys,
         )
         assert out.strip() == ""
+
+
+class _BytesStdin:
+    """Fake stdin exposing a binary ``.buffer`` like a real piped stdin."""
+
+    def __init__(self, data: bytes) -> None:
+        self.buffer = io.BytesIO(data)
+
+    def read(self) -> str:
+        return self.buffer.getvalue().decode("utf-8-sig", errors="replace")
+
+
+# The exact beforeShellExecution event captured live from Cursor agent 2026.06.29
+# (command at top level; the real stdin is additionally prefixed with a UTF-8 BOM).
+_REAL_CURSOR_EVENT = {
+    "conversation_id": "8c1d2f6e",
+    "model": "composer-2.5",
+    "command": "git clone https://github.com/octocat/Hello-World",
+    "cwd": "",
+    "sandbox": False,
+    "hook_event_name": "beforeShellExecution",
+    "cursor_version": "2026.06.29-2ad2186",
+    "workspace_roots": ["C:\\tmp"],
+}
+
+
+class TestCursorRealSchema:
+    """Locks the adapter + stdin reader to Cursor's real, BOM-prefixed event."""
+
+    def test_parse_real_cursor_event(self) -> None:
+        assert (
+            gate_agents.AGENTS["cursor"].parse(_REAL_CURSOR_EVENT)
+            == "git clone https://github.com/octocat/Hello-World"
+        )
+
+    def test_bom_prefixed_event_still_denies(self, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+        payload = b"\xef\xbb\xbf" + json.dumps(_REAL_CURSOR_EVENT).encode("utf-8")
+        monkeypatch.setattr(
+            gate,
+            "scan",
+            lambda _t: (
+                "ok",
+                {"risk_assessment": {"recommendation": "DO_NOT_INSTALL", "score": 9}},
+            ),
+        )
+        monkeypatch.setattr(gate_main.sys, "stdin", _BytesStdin(payload))
+        gate_main.main(["--agent", "cursor"])
+        assert json.loads(capsys.readouterr().out)["permission"] == "deny"
+
+    def test_double_bom_tolerated(self, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+        payload = b"\xef\xbb\xbf\xef\xbb\xbf" + json.dumps(_REAL_CURSOR_EVENT).encode("utf-8")
+        monkeypatch.setattr(
+            gate,
+            "scan",
+            lambda _t: ("ok", {"risk_assessment": {"recommendation": "SAFE", "score": 0}}),
+        )
+        monkeypatch.setattr(gate_main.sys, "stdin", _BytesStdin(payload))
+        gate_main.main(["--agent", "cursor"])
+        assert json.loads(capsys.readouterr().out)["permission"] == "allow"

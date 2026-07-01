@@ -89,8 +89,19 @@ _PKG_INSTALL = re.compile(
 
 
 def _read_event() -> dict:
+    # Some CLIs prefix the JSON with a UTF-8 BOM, which json.loads rejects; read
+    # the raw bytes and decode with utf-8-sig (falling back to text for tests).
     try:
-        return json.loads(sys.stdin.read() or "{}")
+        buffer = getattr(sys.stdin, "buffer", None)
+        if buffer is not None:
+            raw = buffer.read().decode("utf-8-sig", errors="replace")
+        else:
+            raw = sys.stdin.read()
+        raw = raw.lstrip(chr(0xFEFF))
+    except (OSError, ValueError):
+        return {}
+    try:
+        return json.loads(raw or "{}")
     except json.JSONDecodeError:
         return {}
 

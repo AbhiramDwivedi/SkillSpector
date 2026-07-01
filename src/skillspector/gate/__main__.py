@@ -32,8 +32,20 @@ from .agents import AGENT_NAMES, AGENTS
 
 
 def _read_event() -> dict:
+    """Read the hook event from stdin.
+
+    Some CLIs (notably Cursor) write the JSON with a leading UTF-8 BOM, which
+    ``json.loads`` rejects — so read the raw bytes and decode with ``utf-8-sig``
+    (and strip any residual BOM) rather than trusting the console text encoding.
+    Falls back to text ``read()`` when stdin has no binary buffer (e.g. tests).
+    """
     try:
-        raw = sys.stdin.read()
+        buffer = getattr(sys.stdin, "buffer", None)
+        if buffer is not None:
+            raw = buffer.read().decode("utf-8-sig", errors="replace")
+        else:
+            raw = sys.stdin.read()
+        raw = raw.lstrip(chr(0xFEFF))
     except (OSError, ValueError):
         return {}
     try:

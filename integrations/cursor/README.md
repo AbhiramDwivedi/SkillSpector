@@ -45,8 +45,12 @@ bare packages → review). The gate blocks by returning `{"permission": "deny", 
 
 ## Tested
 
-- The installer writes a `hooks.json` matching Cursor's documented schema (verified), and the adapter
-  is covered by unit tests (parse `beforeShellExecution` events, emit `{"permission": "deny"}`).
-- **Live CLI run not yet performed**: `cursor-agent` was not on `PATH` at test time (Cursor CLI was
-  just installed and needs a shell/session restart). Re-run `skillspector install-hook --agent cursor`
-  and exercise a `git clone` once `cursor-agent --version` resolves.
+Validated live against **Cursor `agent` 2026.06.29** (authenticated):
+- The `beforeShellExecution` hook fires in headless (`-p`) mode and Cursor honours the gate's
+  response **both ways**: a `deny` blocked a `git clone` ("A Cursor hook blocked it"); an `allow` let
+  a safe repo through ("The repository was cloned successfully").
+- The shipped `python -m skillspector.gate --agent cursor` parses Cursor's real event end-to-end and
+  returns the right decision from a live scan (e.g. `{"permission": "allow", ...}` on a SAFE repo).
+- Cursor prefixes the hook's stdin with a **UTF-8 BOM**; the gate reads it via `utf-8-sig`
+  (regression-tested with the captured event). Note the CLI binary is `agent` (a `.ps1` on Windows),
+  not `cursor-agent`.
